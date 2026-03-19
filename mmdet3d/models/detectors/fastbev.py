@@ -994,3 +994,116 @@ class FastBEVFish(BaseDetector):
             loss=loss, log_vars=log_vars_, num_samples=len(data['img_metas']))
 
         return outputs
+
+
+@DETECTORS.register_module()
+class FastBEVFish3DOD(FastBEVFish):
+    """Fish-style datalink + original 3DOD bbox head."""
+
+    def __init__(
+        self,
+        backbone,
+        neck,
+        neck_fuse,
+        neck_3d,
+        n_voxels,
+        voxel_size,
+        bbox_head=None,
+        seg_head=None,
+        train_cfg=None,
+        test_cfg=None,
+        init_cfg=None,
+        multi_scale_id=None,
+        backproject='inplace',
+        style='v1',
+        n_cams=4,
+        fisheye=True,
+        **kwargs,
+    ):
+        super().__init__(
+            backbone=backbone,
+            neck=neck,
+            neck_fuse=neck_fuse,
+            neck_3d=neck_3d,
+            n_voxels=n_voxels,
+            voxel_size=voxel_size,
+            psd_head=None,
+            train_cfg=train_cfg,
+            test_cfg=test_cfg,
+            init_cfg=init_cfg,
+            multi_scale_id=multi_scale_id,
+            backproject=backproject,
+            style=style,
+        )
+        self.n_cams = n_cams
+        self.fisheye = fisheye
+
+        if bbox_head is not None:
+            bbox_head.update(train_cfg=train_cfg)
+            bbox_head.update(test_cfg=test_cfg)
+            self.bbox_head = build_head(bbox_head)
+            self.bbox_head.voxel_size = voxel_size
+        else:
+            self.bbox_head = None
+
+        if seg_head is not None:
+            self.seg_head = build_seg_head(seg_head)
+        else:
+            self.seg_head = None
+
+    def forward(self, return_loss=True, **kwargs):
+        if return_loss:
+            return self.forward_train(
+                kwargs['img_metas'],
+                kwargs['img_inputs'],
+                kwargs['gt_bboxes_3d'],
+                kwargs['gt_labels_3d'],
+                gt_bev_seg=kwargs.get('gt_bev_seg', None),
+            )
+        return self.forward_test(
+            kwargs['img_metas'],
+            kwargs['img_inputs'],
+            rescale=kwargs.get('rescale', False),
+        )
+
+    def forward_train(self, img_metas, img_inputs, gt_bboxes_3d, gt_labels_3d, gt_bev_seg=None, **kwargs):
+        img_tr, cam2ego_tr, intrin_tr, post_rot_tr, post_tran_tr, dist_tr, bda_rot = self.prepare_inputs(img_inputs)
+        feature_bev, _, _ = self.extract_feat(
+            img_tr, cam2ego_tr, intrin_tr, post_rot_tr, post_tran_tr, dist_tr, bda_rot, "train")
+        assert self.bbox_head is not None or self.seg_head is not None
+
+        losses = dict()
+        if self.bbox_head is not None:
+            x = self.bbox_head(feature_bev)
+            loss_det = self.bbox_head.loss(*x, gt_bboxes_3d, gt_labels_3d, img_metas)
+            losses.update(loss_det)
+
+        if self.seg_head is not None and gt_bev_seg is not None:
+            assert len(gt_bev_seg) == 1
+            x_bev = self.seg_head(feature_bev)
+            gt_bev = gt_bev_seg[0][None, ...].long()
+            loss_seg = self.seg_head.losses(x_bev, gt_bev)
+            losses.update(loss_seg)
+
+        return losses
+
+    def forward_test(self, img_metas, img_inputs, rescale=False, **kwargs):
+        img_tr, cam2ego_tr, intrin_tr, post_rot_tr, post_tran_tr, dist_tr, bda_rot = self.prepare_inputs(img_inputs)
+        feature_bev, _, _ = self.extract_feat(
+            img_tr, cam2ego_tr, intrin_tr, post_rot_tr, post_tran_tr, dist_tr, bda_rot, "test")
+        assert self.bbox_head is not None, "bbox_head is required for 3DOD inference"
+        x = self.bbox_head(feature_bev)
+        bbox_list = self.bbox_head.get_bboxes(*x, img_metas, rescale=rescale)
+        bbox_results = [
+            bbox3d2result(bboxes, scores, labels)
+            for bboxes, scores, labels in bbox_list
+        ]
+        return bbox_results
+
+    def prepare_inputs(self, inputs):
+        if len(inputs) == 6:
+            img_tr, cam2ego_tr, intrin_tr, post_rot_tr, post_tran_tr, dist_tr = inputs
+            B, N, _, _, _ = img_tr.shape
+            bda_rot = torch.eye(3, device=img_tr.device, dtype=img_tr.dtype).view(1, 1, 3, 3).repeat(B, N, 1, 1)
+            inputs = (img_tr, cam2ego_tr, intrin_tr, post_rot_tr, post_tran_tr, dist_tr, bda_rot)
+        return super().prepare_inputs(inputs)

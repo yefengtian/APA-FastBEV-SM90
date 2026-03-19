@@ -1132,7 +1132,9 @@ class PrepareImageInputsFish_Fullsize(object):
         post_rot_list = []
         post_tran_list = []
         dist_list = []
-        cam_names = results['cam_names']
+        cam_names = results.get('cam_names', None)
+        if cam_names is None:
+            cam_names = list(range(len(results['img_filename'])))
         canvas = []
 
         for i, cam in enumerate(cam_names):
@@ -1161,7 +1163,14 @@ class PrepareImageInputsFish_Fullsize(object):
             imgs.append(self.normalize_img(img))
             # imgs.append(torch.tensor(np.array(img)))
 
-            E, instr_M, dist = results['calibs'][i]
+            if 'calibs' in results:
+                E, instr_M, dist = results['calibs'][i]
+            else:
+                cam_aug = results['lidar2img']['lidar2img_aug'][i]
+                lidar2cam = np.array(cam_aug['lidar2cam_rt'], dtype=np.float32)
+                E = np.linalg.inv(lidar2cam.T).astype(np.float32)
+                instr_M = np.array(cam_aug['intrin'], dtype=np.float32)
+                dist = np.array(cam_aug.get('dist', [0.0, 0.0, 0.0, 0.0]), dtype=np.float32).reshape(-1)[:4]
             intrin_list.append(torch.tensor(instr_M))
             cam2ego_list.append(torch.tensor(E))
             post_rot_list.append(post_rot)
@@ -1276,4 +1285,3 @@ class LoadAnnotationsBEVDepthFish(object):
         
         return results
     
-
