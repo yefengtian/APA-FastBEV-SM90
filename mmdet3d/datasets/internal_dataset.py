@@ -119,9 +119,12 @@ class InternalDataset(Custom3DDataset):
         )
         center2lidar = np.matrix(info['center2lidar'])
         image_paths = []
+        cam_names = []
+        calibs = []
         lidar2img_rts = []
         lidar2img_augs = []
         for cam_type, cam_info in info['cams'].items():
+            cam_names.append(cam_type)
             img_path = os.path.join(self.data_root, cam_info['data_path'])
             image_paths.append(img_path)
 
@@ -157,6 +160,13 @@ class InternalDataset(Custom3DDataset):
 
             lidar2img_rt = np.array((viewpad @ lidar2cam_rt.T))
             lidar2img_rts.append(lidar2img_rt)
+
+            # For teammate fish-style input pipeline:
+            # E is cam->ego transform, intrin is 3x3, dist uses k1..k4.
+            lidar2cam = lidar2cam_rt.T
+            cam2ego = np.linalg.inv(lidar2cam).astype(np.float32)
+            dist = np.array(cam_info.get('dist', [0.0, 0.0, 0.0, 0.0]), dtype=np.float32).reshape(-1)[:4]
+            calibs.append((cam2ego, intrinsic.astype(np.float32), dist))
 
         if self.sequential:
             adjacent_type_list = []
@@ -275,6 +285,8 @@ class InternalDataset(Custom3DDataset):
         input_dict.update(
             dict(
                 img_filename=image_paths,
+                cam_names=cam_names,
+                calibs=calibs,
                 lidar2img=lidar2img_rts,
                 lidar2img_aug=lidar2img_augs,
             )
