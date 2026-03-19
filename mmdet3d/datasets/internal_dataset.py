@@ -110,6 +110,11 @@ class InternalDataset(Custom3DDataset):
                 random.shuffle(data_infos)
             return data_infos
 
+        # psd_type style: jsons/<sample_id>.json
+        data_infos = self._load_annotations_from_psd_jsons()
+        if len(data_infos) > 0:
+            return data_infos
+
         # Raw mode: parse scene*.json directly, aligned with psd_type datalink.
         return self._load_annotations_from_raw_scene()
 
@@ -212,6 +217,140 @@ class InternalDataset(Custom3DDataset):
         if len(data_infos) == 0:
             raise RuntimeError(
                 f'InternalDataset found 0 samples from raw scene json under data_root={self.data_root}')
+        if self.shuffle:
+            random.seed(self.seed)
+            random.shuffle(data_infos)
+        return data_infos
+
+    @staticmethod
+    def _resolve_existing_path(candidates):
+        for p in candidates:
+            if os.path.exists(p):
+                return p
+        return None
+
+    @staticmethod
+    def _quat_to_rot(q):
+        return Quaternion(q).rotation_matrix.astype(np.float32)
+
+    @staticmethod
+    def _build_box_from_points(points_xyz, default_height=0.2):
+        pts = np.array(points_xyz, dtype=np.float32)
+        if pts.shape[0] < 2:
+            return None
+        center = pts.mean(axis=0)
+        if pts.shape[0] >= 4:
+            e01 = pts[1, :2] - pts[0, :2]
+            e12 = pts[2, :2] - pts[1, :2]
+            l01 = np.linalg.norm(e01)
+            l12 = np.linalg.norm(e12)
+            if l01 >= l12:
+                long_v, long_len, short_len = e01, l01, l12
+            else:
+                long_v, long_len, short_len = e12, l12, l01
+            dx = max(float(long_len), 1e-2)
+            dy = max(float(short_len), 1e-2)
+            yaw = float(np.arctan2(long_v[1], long_v[0]))
+        else:
+            v = pts[1, :2] - pts[0, :2]
+            dx = max(float(np.linalg.norm(v)), 1e-2)
+            dy = 0.2
+            yaw = float(np.arctan2(v[1], v[0]))
+        z = float(center[2])
+        dz = max(float(pts[:, 2].max() - pts[:, 2].min()), default_height)
+        return [float(center[0]), float(center[1]), z, dy, dx, dz, yaw]
+
+    def _load_annotations_from_psd_jsons(self):
+        json_files = []
+        json_files.extend(sorted(glob.glob(os.path.join(self.data_root, 'jsons', '*.json'))))
+        for scene_dir in sorted(glob.glob(os.path.join(self.data_root, '*_scene*'))):
+            json_files.extend(sorted(glob.glob(os.path.join(scene_dir, 'jsons', '*.json'))))
+        if len(json_files) == 0:
+            json_files.extend(sorted(glob.glob(os.path.join(self.data_root, '**', 'jsons', '*.json'), recursive=True)))
+        if len(json_files) == 0:
+            return []
+
+        data_infos = []
+        for jf in json_files:
+            info = mmcv.load(jf)
+            if not isinstance(info, dict):
+                continue
+            if 'image_path' not in info or 'calib' not in info:
+                continue
+            scene_id = info.get('scene_id', '')
+            ts = int(info.get('timestamp', 0))
+            cams = {}
+            for cam_name in self.raw_fisheye_cams:
+                if cam_name not in info['image_path'] or cam_name not in info['calib']:
+                    continue
+                img_rel = info['image_path'][cam_name]
+                calib_rel = info['calib'][cam_name]
+
+                img_abs = self._resolve_existing_path([
+                    os.path.join(self.data_root, scene_id, img_rel),
+                    os.path.join(self.data_root, img_rel),
+                    os.path.join(os.path.dirname(jf), '..', img_rel),
+                ])
+                calib_abs = self._resolve_existing_path([
+                    os.path.join(self.data_root, scene_id, calib_rel),
+                    os.path.join(self.data_root, calib_rel),
+                    os.path.join(os.path.dirname(jf), '..', calib_rel),
+                ])
+                if img_abs is None or calib_abs is None:
+                    continue
+                calib_json = mmcv.load(calib_abs)
+                model_key, model = self._pick_fisheye_calib(calib_json)
+                if not model:
+                    continue
+                intrinsic = model.get('camera_intrinsic', model.get('intrinsic_K', None))
+                if intrinsic is None:
+                    continue
+                q = model.get('rotation', None)
+                t = model.get('translation', None)
+                if q is None or t is None:
+                    continue
+                extrinsic = np.eye(4, dtype=np.float32)
+                extrinsic[:3, :3] = self._quat_to_rot(q)
+                extrinsic[:3, 3] = np.array(t, dtype=np.float32)
+                distort = list(model.get('distortion', model.get('k', [0.0, 0.0, 0.0, 0.0])))[:4]
+                while len(distort) < 4:
+                    distort.append(0.0)
+
+                cams[cam_name] = dict(
+                    data_path=os.path.relpath(img_abs, self.data_root),
+                    cam_intrinsic=np.array(intrinsic, dtype=np.float32).tolist(),
+                    extrinsic=extrinsic.tolist(),
+                    dist=distort,
+                    camera_model=model_key or 'fisheye',
+                )
+
+            if len(cams) == 0:
+                continue
+
+            gt_boxes, gt_names = [], []
+            # Generic jsons/*.json reader: only parse available annotation content.
+            for obj in info.get('annotations', {}).get('parking_slot_detection', []):
+                pts = [[p.get('x', 0.0), p.get('y', 0.0), p.get('z', 0.0)] for p in obj.get('points_3d', [])]
+                box = self._build_box_from_points(pts)
+                if box is None:
+                    continue
+                gt_boxes.append(box)
+                if 'category' in obj:
+                    gt_names.append(f"CAT_{int(obj['category'])}")
+                else:
+                    gt_names.append(obj.get('type', 'UNKNOWN'))
+
+            data_infos.append(dict(
+                timestamp=ts,
+                token=info.get('sample_id', os.path.splitext(os.path.basename(jf))[0]),
+                center2lidar=np.eye(4, dtype=np.float32).tolist(),
+                cams=cams,
+                gt_boxes=gt_boxes,
+                gt_names=gt_names,
+            ))
+
+        data_infos = list(sorted(data_infos, key=lambda e: e['timestamp']))
+        data_infos = data_infos[::self.load_interval]
         if self.shuffle:
             random.seed(self.seed)
             random.shuffle(data_infos)

@@ -123,4 +123,3 @@ model = dict(
 load_from = None
 resume_from = None
 fp16 = None
-
