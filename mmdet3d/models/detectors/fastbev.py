@@ -170,16 +170,17 @@ class FastBEV(BaseDetector):
         p = dx * dy * dz
         device = features.device
         dtype = features.dtype
+        geom_dtype = torch.float32
 
-        cam2ego = cam2ego.to(device=device, dtype=dtype)
-        K = K.to(device=device, dtype=dtype)
-        D = D.to(device=device, dtype=dtype)
-        post_rot = post_rot.to(device=device, dtype=dtype)
-        post_tran = post_tran.to(device=device, dtype=dtype)
-        points = points.to(device=device, dtype=dtype)
+        cam2ego = cam2ego.to(device=device, dtype=geom_dtype)
+        K = K.to(device=device, dtype=geom_dtype)
+        D = D.to(device=device, dtype=geom_dtype)
+        post_rot = post_rot.to(device=device, dtype=geom_dtype)
+        post_tran = post_tran.to(device=device, dtype=geom_dtype)
+        points = points.to(device=device, dtype=geom_dtype)
 
         pts = points.view(3, -1)
-        pts = torch.cat([pts, torch.ones((1, p), device=device, dtype=dtype)], dim=0)
+        pts = torch.cat([pts, torch.ones((1, p), device=device, dtype=geom_dtype)], dim=0)
         pts = pts.unsqueeze(0).expand(ncam, 4, p)
         ego2cam = torch.linalg.inv(cam2ego)
         cam_pts = torch.bmm(ego2cam, pts)[:, :3, :]
@@ -723,13 +724,14 @@ class FastBEVFish(BaseDetector):
         P = Dx * Dy * Dz
         device = features.device
         dtype = features.dtype
+        geom_dtype = torch.float32
 
-        cam2ego = cam2ego.to(device=device, dtype=dtype)
-        K = K.to(device=device, dtype=dtype)
-        D = D.to(device=device, dtype=dtype)
-        post_rot = post_rot.to(device=device, dtype=dtype)
-        post_tran = post_tran.to(device=device, dtype=dtype)
-        points = points.to(device=device, dtype=dtype)
+        cam2ego = cam2ego.to(device=device, dtype=geom_dtype)
+        K = K.to(device=device, dtype=geom_dtype)
+        D = D.to(device=device, dtype=geom_dtype)
+        post_rot = post_rot.to(device=device, dtype=geom_dtype)
+        post_tran = post_tran.to(device=device, dtype=geom_dtype)
+        points = points.to(device=device, dtype=geom_dtype)
 
         # points -> (Ncam,4,P)
         pts = points.view(3, -1)

@@ -7,6 +7,7 @@ data = dict(
 )
 
 runner = dict(type='EpochBasedRunner', max_epochs=1)
+total_epochs = 1
 evaluation = dict(interval=1)
 checkpoint_config = dict(interval=1, max_keep_ckpts=1)
 log_config = dict(

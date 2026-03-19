@@ -101,6 +101,16 @@ class InternalDataset(Custom3DDataset):
             random.shuffle(data_infos)
         return data_infos
 
+    def get_cat_ids(self, idx):
+        """Return category ids contained in one sample for CBGS sampler."""
+        info = self.data_infos[idx]
+        gt_names = set(info.get('gt_names', []))
+        cat_ids = []
+        for name in gt_names:
+            if name in self.CLASSES:
+                cat_ids.append(self.cat2id[name])
+        return cat_ids
+
     def pre_get_data_info(self, index):
         info = self.data_infos[index]
         input_dict = dict(

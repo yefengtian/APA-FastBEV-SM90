@@ -1840,11 +1840,19 @@ class RandomAugImageMultiViewImage(object):
         if cam_info is None:
             return None
 
-        lidar2cam_r = np.linalg.inv(cam_info['rot'])
-        lidar2cam_t = cam_info['tran'] @ lidar2cam_r.T
-        lidar2cam_rt = np.eye(4)
-        lidar2cam_rt[:3, :3] = lidar2cam_r.T
-        lidar2cam_rt[3, :3] = -lidar2cam_t
+        if 'rot' in cam_info and 'tran' in cam_info:
+            lidar2cam_r = np.linalg.inv(cam_info['rot'])
+            lidar2cam_t = cam_info['tran'] @ lidar2cam_r.T
+            lidar2cam_rt = np.eye(4, dtype=np.float32)
+            lidar2cam_rt[:3, :3] = lidar2cam_r.T
+            lidar2cam_rt[3, :3] = -lidar2cam_t
+        elif 'lidar2cam_rt' in cam_info:
+            # Non-sequential samples may not provide rot/tran explicitly.
+            lidar2cam_rt = np.array(cam_info['lidar2cam_rt'], dtype=np.float32)
+        else:
+            raise KeyError(
+                f"cam_info must contain ('rot','tran') or 'lidar2cam_rt', got keys: {list(cam_info.keys())}"
+            )
         intrinsic = cam_info['intrin']
 
         viewpad = np.eye(4)
