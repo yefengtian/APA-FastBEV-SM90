@@ -1,6 +1,7 @@
 import numpy as np
 from mmdet.datasets import DATASETS
 import os
+import glob
 import torch
 from mmdet3d.core.visualizer.image_vis import draw_lidar_bbox3d_on_img
 from mmdet3d.core.bbox import LiDARInstance3DBoxes
@@ -24,6 +25,12 @@ class InternalDataset(Custom3DDataset):
     cams = [
         'center_camera_fov120', 'left_front_camera', 'left_rear_camera',
         'rear_camera', 'right_rear_camera', "right_front_camera"
+    ]
+    raw_fisheye_cams = [
+        'CAM_FISHEYE_FORWARD',
+        'CAM_FISHEYE_LEFT',
+        'CAM_FISHEYE_BACKWARD',
+        'CAM_FISHEYE_RIGHT',
     ]
     lidar2img_rts = []
 
@@ -93,8 +100,110 @@ class InternalDataset(Custom3DDataset):
             return data
 
     def load_annotations(self, ann_file):
-        data = mmcv.load(ann_file)
-        data_infos = list(sorted(data['infos'], key=lambda e: e['timestamp']))
+        # Mode 1: legacy prebuilt infos.pkl
+        if ann_file is not None and str(ann_file).endswith('.pkl'):
+            data = mmcv.load(ann_file)
+            data_infos = list(sorted(data['infos'], key=lambda e: e['timestamp']))
+            data_infos = data_infos[::self.load_interval]
+            if self.shuffle:
+                random.seed(self.seed)
+                random.shuffle(data_infos)
+            return data_infos
+
+        # Mode 2: build infos directly from raw scene*.json under data_root
+        return self._load_annotations_from_raw_scene()
+
+    @staticmethod
+    def _pick_fisheye_calib(calibration_param):
+        for key in ['mei', 'fisheye', 'ocam', 'pinhole']:
+            if key in calibration_param and calibration_param[key].get('valid', True):
+                return key, calibration_param[key]
+        return None, {}
+
+    def _load_annotations_from_raw_scene(self):
+        scene_jsons = []
+        for scene_dir in sorted(glob.glob(os.path.join(self.data_root, '*_scene*'))):
+            scene_jsons.extend(sorted(glob.glob(os.path.join(scene_dir, 'scene*.json'))))
+
+        data_infos = []
+        for scene_json in scene_jsons:
+            scene_dir = os.path.dirname(scene_json)
+            scene_name = os.path.basename(scene_dir)
+            frames = mmcv.load(scene_json)
+            if not isinstance(frames, list):
+                continue
+
+            for frame in frames:
+                cam_info = frame.get('cam_info', {})
+                gt_info = frame.get('gt_info', {}).get('gt_od', [])
+                ts = int(frame.get('timestamp'))
+
+                cams = {}
+                for cam_name in self.raw_fisheye_cams:
+                    cam = cam_info.get(cam_name, None)
+                    if cam is None:
+                        continue
+                    calib_key, calib = self._pick_fisheye_calib(cam.get('calibration_param', {}))
+                    extrinsic = calib.get('extrinsic_vcs2ccs', calib.get('extrinsic_lcs2ccs', None))
+                    intrinsic = calib.get('intrinsic_K', calib.get('camera_intrinsic', None))
+                    if extrinsic is None or intrinsic is None:
+                        continue
+
+                    distort = calib.get('k', calib.get('distortion', calib.get('intrinsic_distort', [0, 0, 0, 0])))
+                    distort = list(distort)[:4]
+                    while len(distort) < 4:
+                        distort.append(0.0)
+
+                    file_path = cam.get('file_path', '')
+                    img_name = os.path.basename(file_path)
+                    # In raw scene json, file_path may point to another layout.
+                    # Resolve to local extracted scene folder first.
+                    data_path = os.path.join(scene_name, 'img', str(ts), cam_name, img_name)
+                    abs_img = os.path.join(self.data_root, data_path)
+                    if not os.path.exists(abs_img):
+                        fallback = glob.glob(os.path.join(scene_dir, 'img', str(ts), cam_name, '*.jpg'))
+                        if fallback:
+                            data_path = os.path.relpath(fallback[0], self.data_root)
+                        else:
+                            continue
+
+                    cams[cam_name] = dict(
+                        data_path=data_path,
+                        cam_intrinsic=intrinsic,
+                        extrinsic=extrinsic,
+                        dist=distort,
+                        camera_model=cam.get('camera_model', calib_key or 'fisheye'),
+                    )
+
+                if len(cams) == 0:
+                    continue
+
+                gt_boxes, gt_names = [], []
+                for obj in gt_info:
+                    if obj.get('ignore', False):
+                        continue
+                    center = obj.get('vcs_3d_ct', [0.0, 0.0, 0.0])
+                    dim = obj.get('dim', [0.0, 0.0, 0.0])  # [l, w, h]
+                    yaw = obj.get('vcs_3d_yaw', 0.0)
+                    if len(center) != 3 or len(dim) != 3:
+                        continue
+                    gt_boxes.append([
+                        float(center[0]), float(center[1]), float(center[2]),
+                        float(dim[1]), float(dim[0]), float(dim[2]), float(yaw)
+                    ])
+                    cat = int(obj.get('category', -1))
+                    gt_names.append(f'CAT_{cat}')
+
+                data_infos.append(dict(
+                    timestamp=ts,
+                    token=frame.get('token', f'{scene_name}_{ts}'),
+                    center2lidar=np.eye(4, dtype=np.float32).tolist(),
+                    cams=cams,
+                    gt_boxes=gt_boxes,
+                    gt_names=gt_names,
+                ))
+
+        data_infos = list(sorted(data_infos, key=lambda e: e['timestamp']))
         data_infos = data_infos[::self.load_interval]
         if self.shuffle:
             random.seed(self.seed)

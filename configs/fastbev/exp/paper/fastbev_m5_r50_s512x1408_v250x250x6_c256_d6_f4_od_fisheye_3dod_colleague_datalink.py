@@ -4,7 +4,8 @@ _base_ = ['./fastbev_m5_r50_s512x1408_v250x250x6_c256_d6_f4.py']
 class_names = [f'CAT_{i}' for i in range(10)]
 dataset_type = 'InternalDataset'
 data_root = '/Users/darry/magna/proj/Fastbev_3dod/data/od-demo-c-0701-full/'
-ann_file = data_root + 'od_fisheye_infos.pkl'
+# Read scene*.json directly (no pkl conversion step).
+ann_file = None
 point_cloud_range = [-50, -50, -5, 50, 50, 3]
 
 input_modality = dict(
@@ -119,4 +120,3 @@ model = dict(
 # Do not load base nuImages pretrain path by default.
 load_from = None
 resume_from = None
-
